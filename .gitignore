@@ -1,0 +1,10 @@
+*.o
+Makefile
+moc_*
+ui_*
+.qmake.stash
+*.pro.user
+Trem
+build/
+.vscode/
+
