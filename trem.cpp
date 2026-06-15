@@ -26,7 +26,6 @@ Trem::Trem(int id,
            const QVector<QPoint> &trajeto,
            QObject *parent)
     : QThread(parent),
-      regiaoAtual(RC_NENHUMA),
       posicaoAtual(posicaoInicial),
       trajeto(trajeto),
       indiceProximoPonto(0),
@@ -113,19 +112,19 @@ QRect Trem::areaRegiao(int regiao)
     case RC2:
         return QRect(480, 92, 56, 80);
     case RC3:
-        return QRect(80, 194, 128, 44);
+        return QRect(80, 196, 128, 44);
     case RC4:
-        return QRect(288, 279, 100, 44);
+        return QRect(288, 281, 100, 44);
     case RC5:
-        return QRect(388, 279, 100, 44);
+        return QRect(388, 281, 100, 44);
     case RC6:
-        return QRect(560, 194, 96, 44);
+        return QRect(560, 196, 96, 44);
     case RC7:
         return QRect(240, 323, 56, 76);
     case RC8:
-        return QRect(488, 323, 40, 37);
+        return QRect(490, 323, 40, 37);
     case RC9:
-        return QRect(488, 360, 40, 38);
+        return QRect(490, 360, 40, 38);
     default:
         return QRect();
     }
@@ -157,15 +156,16 @@ QString Trem::nomeRegiao(int regiao)
     }
 }
 
-int Trem::identificarRegiao(int x, int y) const
+QVector<int> Trem::identificarRegioes(int x, int y) const
 {
+    QVector<int> regioes;
     for (int regiao = RC1; regiao <= RC9; ++regiao) {
         if (retanguloTrem(x, y).intersects(areaRegiao(regiao))) {
-            return regiao;
+            regioes.append(regiao);
         }
     }
 
-    return RC_NENHUMA;
+    return regioes;
 }
 
 bool Trem::avancarUmPasso()
@@ -221,94 +221,122 @@ void Trem::run()
 {
     emit updateGUI(ID, posicaoAtual.x(), posicaoAtual.y());
 
-    const int regiaoInicial = identificarRegiao(posicaoAtual.x(), posicaoAtual.y());
-    if (regiaoInicial != RC_NENHUMA) {
-        qDebug() << "Trem" << ID << "esperando RC" << regiaoInicial
-                 << nomeRegiao(regiaoInicial)
-                 << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
+    auto registrarEntrada = [&](int regiao, const QPoint &coordenadas) {
+        qDebug() << "Trem" << ID << "entrou RC" << regiao
+                 << nomeRegiao(regiao)
+                 << "coordenadas" << coordenadasTexto(coordenadas.x(), coordenadas.y())
                  << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
+    };
 
-        rc[regiaoInicial - 1].lock();
-        regiaoAtual = regiaoInicial;
-
-        qDebug() << "Trem" << ID << "entrou RC" << regiaoAtual
-                 << nomeRegiao(regiaoAtual)
-                 << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
+    auto registrarSaida = [&](int regiao, const QPoint &coordenadas) {
+        qDebug() << "Trem" << ID << "saiu RC" << regiao
+                 << nomeRegiao(regiao)
+                 << "coordenadas" << coordenadasTexto(coordenadas.x(), coordenadas.y())
                  << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
-    }
+    };
+
+    auto registrarEspera = [&](int regiao, const QPoint &coordenadas) {
+        qDebug() << "Trem" << ID << "esperando RC" << regiao
+                 << nomeRegiao(regiao)
+                 << "coordenadas" << coordenadasTexto(coordenadas.x(), coordenadas.y())
+                 << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
+    };
+
+    auto diferencaRegioes = [](const QVector<int> &origem, const QVector<int> &alvo) {
+        QVector<int> resultado;
+        for (int regiao : origem) {
+            if (!alvo.contains(regiao)) {
+                resultado.append(regiao);
+            }
+        }
+        return resultado;
+    };
+
+    auto tentarBloquearRegioes = [&](const QVector<int> &regioes,
+                                     const QPoint &coordenadas,
+                                     QVector<int> *bloqueadas) -> bool {
+        bloqueadas->clear();
+
+        for (int regiao : regioes) {
+            if (!rc[regiao - 1].tryLock()) {
+                registrarEspera(regiao, coordenadas);
+                return false;
+            }
+
+            bloqueadas->append(regiao);
+            registrarEntrada(regiao, coordenadas);
+        }
+
+        return true;
+    };
+
+    auto liberarRegioes = [&](const QVector<int> &regioes, const QPoint &coordenadas) {
+        for (int indice = regioes.size() - 1; indice >= 0; --indice) {
+            const int regiao = regioes.at(indice);
+            rc[regiao - 1].unlock();
+            registrarSaida(regiao, coordenadas);
+        }
+    };
+
+    QVector<int> regioesBloqueadas;
 
     while (!isInterruptionRequested()) {
+        const QVector<int> regioesAtuais = identificarRegioes(posicaoAtual.x(), posicaoAtual.y());
+
+        // A posicao atual deve possuir suas regioes antes de qualquer movimento.
+        if (regioesBloqueadas.isEmpty() && !regioesAtuais.isEmpty()) {
+            QVector<int> adquiridas;
+            if (!tentarBloquearRegioes(regioesAtuais, posicaoAtual, &adquiridas)) {
+                liberarRegioes(adquiridas, posicaoAtual);
+                msleep(static_cast<unsigned long>(atrasoDaIteracao()));
+                continue;
+            }
+
+            regioesBloqueadas = adquiridas;
+        }
+
         if (velocidade <= 0) {
             msleep(static_cast<unsigned long>(atrasoDaIteracao()));
             continue;
         }
 
         const QPoint proximaPosicao = preverProximaPosicao();
-        const int regiaoProxima = identificarRegiao(proximaPosicao.x(), proximaPosicao.y());
+        const QVector<int> regioesProximas = identificarRegioes(proximaPosicao.x(), proximaPosicao.y());
 
-        if (regiaoAtual == regiaoProxima) {
-            avancarUmPasso();
-        } else if (regiaoAtual == RC_NENHUMA && regiaoProxima != RC_NENHUMA) {
-            qDebug() << "Trem" << ID << "esperando RC" << regiaoProxima
-                     << nomeRegiao(regiaoProxima)
-                     << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
-                     << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
+        // Apenas a proxima fronteira imediata pode ser adquirida nesta iteracao.
+        QVector<int> regioesNovas = diferencaRegioes(regioesProximas, regioesBloqueadas);
+        QVector<int> regioesASoltar = diferencaRegioes(regioesBloqueadas, regioesProximas);
 
-            rc[regiaoProxima - 1].lock();
-            regiaoAtual = regiaoProxima;
+        QVector<int> regioesAdquiridasNestaIteracao;
+        bool podeAvancar = true;
 
-            qDebug() << "Trem" << ID << "entrou RC" << regiaoAtual
-                     << nomeRegiao(regiaoAtual)
-                     << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
-                     << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
+        for (int regiao : regioesNovas) {
+            if (!rc[regiao - 1].tryLock()) {
+                registrarEspera(regiao, posicaoAtual);
+                podeAvancar = false;
+                break;
+            }
 
-            avancarUmPasso();
-        } else if (regiaoAtual != RC_NENHUMA && regiaoProxima != RC_NENHUMA && regiaoAtual != regiaoProxima) {
-            qDebug() << "Trem" << ID << "esperando RC" << regiaoProxima
-                     << nomeRegiao(regiaoProxima)
-                     << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
-                     << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
-
-            rc[regiaoProxima - 1].lock();
-
-            qDebug() << "Trem" << ID << "entrou RC" << regiaoProxima
-                     << nomeRegiao(regiaoProxima)
-                     << "coordenadas" << coordenadasTexto(proximaPosicao.x(), proximaPosicao.y())
-                     << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
-
-            avancarUmPasso();
-
-            const int regiaoAnterior = regiaoAtual;
-            rc[regiaoAnterior - 1].unlock();
-            qDebug() << "Trem" << ID << "saiu RC" << regiaoAnterior
-                     << nomeRegiao(regiaoAnterior)
-                     << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
-                     << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
-            regiaoAtual = regiaoProxima;
-        } else if (regiaoAtual != RC_NENHUMA && regiaoProxima == RC_NENHUMA) {
-            avancarUmPasso();
-
-            const int regiaoAnterior = regiaoAtual;
-            rc[regiaoAnterior - 1].unlock();
-            qDebug() << "Trem" << ID << "saiu RC" << regiaoAnterior
-                     << nomeRegiao(regiaoAnterior)
-                     << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
-                     << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
-            regiaoAtual = RC_NENHUMA;
-        } else {
-            avancarUmPasso();
+            regioesAdquiridasNestaIteracao.append(regiao);
+            registrarEntrada(regiao, posicaoAtual);
         }
 
+        if (!podeAvancar) {
+            liberarRegioes(regioesAdquiridasNestaIteracao, posicaoAtual);
+            msleep(static_cast<unsigned long>(atrasoDaIteracao()));
+            continue;
+        }
+
+        avancarUmPasso();
         emit updateGUI(ID, posicaoAtual.x(), posicaoAtual.y());
+
+        // Libera a regiao antiga somente depois que o trem saiu dela.
+        liberarRegioes(regioesASoltar, posicaoAtual);
+
+        regioesBloqueadas = regioesProximas;
         msleep(static_cast<unsigned long>(atrasoDaIteracao()));
     }
 
-    if (regiaoAtual != RC_NENHUMA) {
-        rc[regiaoAtual - 1].unlock();
-        qDebug() << "Trem" << ID << "saiu RC" << regiaoAtual
-                 << nomeRegiao(regiaoAtual)
-                 << "coordenadas" << coordenadasTexto(posicaoAtual.x(), posicaoAtual.y())
-                 << "hora" << QDateTime::currentDateTime().toString(Qt::ISODate);
-        regiaoAtual = RC_NENHUMA;
-    }
+    // Garante liberacao limpa ao encerrar a thread.
+    liberarRegioes(regioesBloqueadas, posicaoAtual);
 }

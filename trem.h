@@ -46,13 +46,12 @@ private:
     bool avancarUmPasso();
     int atrasoDaIteracao() const;
     QPoint preverProximaPosicao() const;
-    int identificarRegiao(int x, int y) const;
+    QVector<int> identificarRegioes(int x, int y) const;
     static QRect areaRegiao(int regiao);
     static QString nomeRegiao(int regiao);
 
     static QMutex rc[9];
 
-    int regiaoAtual;
     QPoint posicaoAtual;
     QVector<QPoint> trajeto;
     int indiceProximoPonto;
